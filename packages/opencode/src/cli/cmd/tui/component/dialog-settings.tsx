@@ -55,6 +55,12 @@ export function DialogSettings() {
       title: "Docs Mode",
       value: config().docs_model,
     },
+    {
+      type: "model",
+      key: "vision_model",
+      title: "Vision Mode",
+      value: config().vision_model,
+    },
   ])
 
   // Directly update the sync store config - bypasses server cache issues
@@ -71,6 +77,7 @@ export function DialogSettings() {
       <DialogModelSelector
         title={`Select ${option.title}`}
         currentValue={option.value as string | undefined}
+        visionOnly={option.key === "vision_model"}
         onSelect={async (model) => {
           try {
             await Config.updateGlobal({ [option.key]: model || undefined })
@@ -126,7 +133,7 @@ export function DialogSettings() {
 
   // Set dialog to large size
   dialog.setSize("large")
-  
+
   return (
     <DialogSelect
       title="Mode Settings"
@@ -144,6 +151,7 @@ function DialogModelSelector(props: {
   title: string
   currentValue: string | undefined
   onSelect: (model: string) => void
+  visionOnly?: boolean
 }) {
   const sync = useSync()
   const dialog = useDialog()
@@ -173,7 +181,7 @@ function DialogModelSelector(props: {
           pipe(
             provider.models,
             entries(),
-            filter(([_, info]) => info.status !== "deprecated"),
+            filter(([_, info]) => info.status !== "deprecated" && (!props.visionOnly || info.capabilities?.input?.image)),
             map(([modelId, info]) => {
               const fullModel = `${provider.id}/${modelId}`
               return {

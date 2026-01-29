@@ -886,13 +886,23 @@ export function Prompt(props: PromptProps) {
                         clearInterval(timer)
                       })
                     })
+                    const busyMessage = createMemo(() => {
+                      const s = status()
+                      if (s.type === "busy" && "message" in s) return (s as any).message as string | undefined
+                      return undefined
+                    })
                     return (
-                      <Show when={retry()}>
-                        <text fg={theme.error}>
-                          {message()} [retrying {seconds() > 0 ? `in ${seconds()}s ` : ""}
-                          attempt #{retry()!.attempt}]
-                        </text>
-                      </Show>
+                      <>
+                        <Show when={retry()}>
+                          <text fg={theme.error}>
+                            {message()} [retrying {seconds() > 0 ? `in ${seconds()}s ` : ""}
+                            attempt #{retry()!.attempt}]
+                          </text>
+                        </Show>
+                        <Show when={!retry() && busyMessage()}>
+                          <text fg={theme.textMuted}>{busyMessage()}</text>
+                        </Show>
+                      </>
                     )
                   })()}
                 </box>

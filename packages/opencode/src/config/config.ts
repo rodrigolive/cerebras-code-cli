@@ -594,6 +594,10 @@ export namespace Config {
         .string()
         .describe("Model to use for documentation tasks in the format of provider/model")
         .optional(),
+      vision_model: z
+        .string()
+        .describe("Model to use for vision/image tasks in the format of provider/model. Must support image input.")
+        .optional(),
       auto_switch_models: z
         .boolean()
         .describe("Allow the model to automatically switch between modes (build/plan/docs)")
@@ -622,6 +626,7 @@ export namespace Config {
           build: Agent.optional(),
           general: Agent.optional(),
           explore: Agent.optional(),
+          vision: Agent.optional(),
         })
         .catchall(Agent)
         .optional()
