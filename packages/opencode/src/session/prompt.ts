@@ -694,7 +694,26 @@ export namespace SessionPrompt {
             {
               async transformParams(args: { type: string; params: { prompt?: ModelMessage[]; tools?: unknown[] } }) {
                 if (args.type === "stream") {
-                  args.params.prompt = await ProviderTransform.message(args.params.prompt as ModelMessage[], model, sessionID)
+                  args.params.prompt = await ProviderTransform.message(
+                    args.params.prompt as ModelMessage[],
+                    model,
+                    sessionID,
+                    async (info) => {
+                      const modelName = info.visionModel.split("/").pop() ?? info.visionModel
+                      await Session.updatePart({
+                        id: Identifier.ascending("part"),
+                        messageID: processor.message.id,
+                        sessionID,
+                        type: "text",
+                        synthetic: true,
+                        text: `*[${modelName} interpreted ${info.imageCount} image${info.imageCount > 1 ? "s" : ""}]*\n\n${info.description}`,
+                        time: {
+                          start: Date.now(),
+                          end: Date.now(),
+                        },
+                      })
+                    },
+                  )
                 }
                 // Transform tool schemas for provider compatibility
                 if (args.params.tools && Array.isArray(args.params.tools)) {

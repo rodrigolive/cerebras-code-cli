@@ -191,8 +191,9 @@ export namespace ProviderTransform {
   }
 
   function getPartImageKey(part: any): string | undefined {
-    if (part.type === "image") return hashImageData(String(part.image))
+    if (part.type === "image" && part.image) return hashImageData(String(part.image))
     if (part.type === "file" && part.url) return hashImageData(String(part.url))
+    if (part.type === "file" && part.data) return hashImageData(String(part.data))
     return undefined
   }
 
@@ -277,10 +278,17 @@ export namespace ProviderTransform {
     }
   }
 
+  export type VisionResultCallback = (info: {
+    description: string
+    visionModel: string
+    imageCount: number
+  }) => void | Promise<void>
+
   async function unsupportedParts(
     msgs: ModelMessage[],
     model: Provider.Model,
     sessionID?: string,
+    onVisionResult?: VisionResultCallback,
   ): Promise<ModelMessage[]> {
     // Pre-check: resolve vision model once (only if needed)
     let visionResolved = false
@@ -327,7 +335,8 @@ export namespace ProviderTransform {
       for (const part of msg.content) {
         if (isUnsupportedImagePart(part, model)) {
           imageParts.push(part)
-          imageKeys.push(getPartImageKey(part) ?? "")
+          const key = getPartImageKey(part)
+          imageKeys.push(key ?? `unknown-${imageParts.length}`)
         } else {
           // Apply standard fallback for non-image unsupported parts
           otherParts.push(fallbackErrorPart(part, model))
@@ -335,14 +344,14 @@ export namespace ProviderTransform {
       }
 
       // Check cache for all image parts
-      const allCached = imageKeys.every((key) => key && cache?.has(key))
+      const allCached = cache !== undefined && imageKeys.every((key) => cache.has(key))
       if (allCached && cache) {
         const descriptions = imageKeys.map((key) => cache.get(key)!)
         const newContent = [
           ...otherParts,
           ...descriptions.map((desc) => ({
             type: "text" as const,
-            text: `[Image description from vision model]: ${desc}`,
+            text: `[The user shared an image. A vision model analyzed it and produced this description — use it as if you can see the image yourself]:\n${desc}`,
           })),
         ]
         result.push({ ...msg, content: newContent })
@@ -366,9 +375,12 @@ export namespace ProviderTransform {
           {
             type: "text",
             text: [
-              "Describe the content of the image(s) above in detail.",
-              textParts ? `The user's context: "${textParts}"` : "",
-              "Provide a thorough text description that captures all relevant visual information.",
+              "You are a vision subagent. Your only job is to describe what you see in the image(s).",
+              "Output a concise, factual description of the visual content.",
+              "Do NOT engage with the user, do NOT ask questions, do NOT offer to help.",
+              "Do NOT attempt to interpret intent or suggest actions.",
+              "Just describe what is visible: layout, text, colors, UI elements, code, diagrams, etc.",
+              textParts ? `Context for relevance: "${textParts}"` : "",
             ]
               .filter(Boolean)
               .join(" "),
@@ -400,7 +412,7 @@ export namespace ProviderTransform {
           ...otherParts,
           {
             type: "text" as const,
-            text: `[Image description from vision model]: ${descriptionText}`,
+            text: `[The user shared an image. A vision model analyzed it and produced this description — use it as if you can see the image yourself]:\n${descriptionText}`,
           },
         ]
         result.push({ ...msg, content: newContent })
@@ -409,6 +421,14 @@ export namespace ProviderTransform {
           imageCount: imageParts.length,
           visionModel: vision.model.id,
         })
+
+        if (onVisionResult) {
+          await onVisionResult({
+            description: descriptionText,
+            visionModel: vision.model.id,
+            imageCount: imageParts.length,
+          })
+        }
       } catch (error) {
         log.error("vision conversion failed", { error })
         // Fall back to error text
@@ -420,15 +440,20 @@ export namespace ProviderTransform {
         result.push({ ...msg, content: filtered })
       } finally {
         if (sessionID) {
-          SessionStatus.set(sessionID, { type: "busy" })
+          SessionStatus.set(sessionID, { type: "busy", message: undefined })
         }
       }
     }
     return result
   }
 
-  export async function message(msgs: ModelMessage[], model: Provider.Model, sessionID?: string) {
-    msgs = await unsupportedParts(msgs, model, sessionID)
+  export async function message(
+    msgs: ModelMessage[],
+    model: Provider.Model,
+    sessionID?: string,
+    onVisionResult?: VisionResultCallback,
+  ) {
+    msgs = await unsupportedParts(msgs, model, sessionID, onVisionResult)
     msgs = normalizeMessages(msgs, model)
     if (model.providerID === "anthropic" || model.api.id.includes("anthropic") || model.api.id.includes("claude")) {
       msgs = applyCaching(msgs, model.providerID)
