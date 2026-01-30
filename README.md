@@ -49,6 +49,7 @@ bun dev
 - 🔧 **Coding agent** — File editing, bash commands, code analysis
 - 📊 **Cache monitoring** — Real-time hit rate with sparklines and alerts
 - 🔌 **LSP & MCP** — Language server and Model Context Protocol support
+- 🔍 **Vision Processing** — Use a separate model for vision processing as subagent
 
 ---
 
@@ -58,6 +59,9 @@ Switch with `Tab`:
 
 - **build** — Full access for development (default)
 - **plan** — Read-only for analysis
+- **vision** - For processing images. When setup (ie to an openrouter model)
+  it will be used as a subagent in any Cerebras Code agent to **replace images
+  with with their vision-processed descriptions**.
 
 ---
 
