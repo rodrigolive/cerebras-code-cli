@@ -185,15 +185,46 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         return undefined
       })
 
+      function isModelVisionCapable(model: { providerID: string; modelID: string }) {
+        const provider = sync.data.provider.find((x) => x.id === model.providerID)
+        const info = provider?.models[model.modelID]
+        return info?.capabilities?.input?.image === true
+      }
+
+      // Priority list of vision-capable models to auto-detect based on available providers
+      const visionModelPriority: { providerID: string; modelID: string }[] = [
+        { providerID: "openai", modelID: "gpt-5-mini" },
+        { providerID: "anthropic", modelID: "claude-haiku-4-5" },
+        { providerID: "google", modelID: "gemini-2.5-flash" },
+        { providerID: "openrouter", modelID: "openai/gpt-5-mini" },
+      ]
+
+      const autoDetectedVisionModel = createMemo(() => {
+        for (const candidate of visionModelPriority) {
+          if (isModelValid(candidate) && isModelVisionCapable(candidate)) {
+            return candidate
+          }
+        }
+        // Scan all providers for any vision-capable model
+        for (const provider of sync.data.provider) {
+          for (const [modelID, info] of Object.entries(provider.models)) {
+            if (info.capabilities?.input?.image && info.status !== "deprecated") {
+              return { providerID: provider.id, modelID }
+            }
+          }
+        }
+        return undefined
+      })
+
       const currentModel = createMemo(() => {
         const a = agent.current()
         const cfg = sync.data.config as Record<string, any>
-        
+
         // Check for agent-specific model in config (e.g., plan_model, build_model, general_model, explore_model)
         const agentSpecificModel = () => {
           const agentModelKey = `${a.name}_model`
           const agentModel = cfg[agentModelKey] as string | undefined
-          
+
           if (agentModel) {
             const { providerID, modelID } = Provider.parseModel(agentModel)
             if (isModelValid({ providerID, modelID })) {
@@ -202,15 +233,21 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           }
           return undefined
         }
-        
-        return (
+
+        const resolved =
           getFirstValidModel(
             () => modelStore.model[a.name],
             agentSpecificModel,
             () => a.model,
             fallbackModel,
           ) ?? undefined
-        )
+
+        // Vision agent requires a vision-capable model — don't fall back to non-vision models
+        if (a.name === "vision" && resolved && !isModelVisionCapable(resolved)) {
+          return autoDetectedVisionModel()
+        }
+
+        return resolved
       })
 
       return {
@@ -227,6 +264,14 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         parsed: createMemo(() => {
           const value = currentModel()
           if (!value) {
+            const a = agent.current()
+            if (a.name === "vision") {
+              return {
+                provider: "",
+                model: "Set via /settings",
+                reasoning: false,
+              }
+            }
             return {
               provider: "Cerebras",
               model: "Loading...",

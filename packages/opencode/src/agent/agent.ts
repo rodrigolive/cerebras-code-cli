@@ -168,6 +168,16 @@ export namespace Agent {
         mode: "primary",
         builtIn: true,
       },
+      vision: {
+        name: "vision",
+        description:
+          "Vision-capable agent for image analysis and visual tasks. Also used as the fallback for image processing when the current model does not support vision.",
+        tools: { ...defaultTools },
+        options: {},
+        permission: agentPermission,
+        mode: "primary",
+        builtIn: true,
+      },
     }
     for (const [key, value] of Object.entries(cfg.agent ?? {})) {
       if (value.disable) {

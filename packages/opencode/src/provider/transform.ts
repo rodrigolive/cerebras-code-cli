@@ -2,10 +2,32 @@ import type { ModelMessage } from "@ai-sdk/provider-utils"
 import type { APICallError } from "@ai-sdk/provider"
 import { unique } from "remeda"
 import type { JSONSchema } from "zod/v4/core"
-import type { Provider } from "./provider"
+import { Provider } from "./provider"
 import type { ModelsDev } from "./models"
+import { Agent } from "../agent/agent"
+import { Config } from "../config/config"
+import { generateText } from "ai"
+import { SessionStatus } from "../session/status"
+import { Log } from "../util/log"
 
 type Modality = NonNullable<ModelsDev.Model["modalities"]>["input"][number]
+
+const log = Log.create({ service: "provider.transform" })
+
+// In-memory cache: sessionID -> Map<imageHash, description>
+const visionCache = new Map<string, Map<string, string>>()
+
+function getVisionCache(sessionID: string): Map<string, string> {
+  if (!visionCache.has(sessionID)) {
+    visionCache.set(sessionID, new Map())
+  }
+  return visionCache.get(sessionID)!
+}
+
+function hashImageData(data: string): string {
+  // Use first 200 chars + length as a lightweight hash key
+  return `${data.length}:${data.substring(0, 200)}`
+}
 
 function mimeToModality(mime: string): Modality | undefined {
   if (mime.startsWith("image/")) return "image"
@@ -162,33 +184,276 @@ export namespace ProviderTransform {
     return msgs
   }
 
-  function unsupportedParts(msgs: ModelMessage[], model: Provider.Model): ModelMessage[] {
-    return msgs.map((msg) => {
-      if (msg.role !== "user" || !Array.isArray(msg.content)) return msg
-
-      const filtered = msg.content.map((part) => {
-        const p = part as { type: string; image?: unknown; mediaType?: string; filename?: string }
-        if (p.type !== "file" && p.type !== "image") return part
-
-        const mime = p.type === "image" ? String(p.image).split(";")[0].replace("data:", "") : p.mediaType
-        const filename = p.type === "file" ? p.filename : undefined
-        const modality = mimeToModality(mime ?? "")
-        if (!modality) return part
-        if (model.capabilities.input[modality]) return part
-
-        const name = filename ? `"${filename}"` : modality
-        return {
-          type: "text" as const,
-          text: `ERROR: Cannot read ${name} (this model does not support ${modality} input). Inform the user.`,
-        }
-      })
-
-      return { ...msg, content: filtered }
-    })
+  function getPartMime(part: any): string | undefined {
+    if (part.type === "image") return String(part.image).split(";")[0].replace("data:", "")
+    if (part.type === "file") return part.mediaType
+    return undefined
   }
 
-  export function message(msgs: ModelMessage[], model: Provider.Model) {
-    msgs = unsupportedParts(msgs, model)
+  function getPartImageKey(part: any): string | undefined {
+    if (part.type === "image" && part.image) return hashImageData(String(part.image))
+    if (part.type === "file" && part.url) return hashImageData(String(part.url))
+    if (part.type === "file" && part.data) return hashImageData(String(part.data))
+    return undefined
+  }
+
+  function isUnsupportedImagePart(part: any, model: Provider.Model): boolean {
+    if (part.type !== "file" && part.type !== "image") return false
+    const mime = getPartMime(part)
+    const modality = mimeToModality(mime ?? "")
+    return modality === "image" && !model.capabilities.input.image
+  }
+
+  function fallbackErrorPart(part: any, model: Provider.Model, extra?: string): any {
+    const mime = getPartMime(part)
+    const filename = part.type === "file" ? part.filename : undefined
+    const modality = mimeToModality(mime ?? "")
+    if (!modality) return part
+    if (model.capabilities.input[modality]) return part
+    const name = filename ? `"${filename}"` : modality
+    const suffix = extra ? ` (${extra})` : ""
+    return {
+      type: "text" as const,
+      text: `ERROR: Cannot read ${name} (this model does not support ${modality} input)${suffix}. Inform the user.`,
+    }
+  }
+
+  // Priority list of vision-capable models to auto-detect based on available providers
+  const visionModelPriority = [
+    { providerID: "openai", modelID: "gpt-5-mini" },
+    { providerID: "anthropic", modelID: "claude-haiku-4-5" },
+    { providerID: "google", modelID: "gemini-2.5-flash" },
+    { providerID: "openrouter", modelID: "openai/gpt-5-mini" },
+  ]
+
+  async function resolveVisionModel(): Promise<{
+    model: Provider.Model
+    language: any
+  } | undefined> {
+    try {
+      // Check vision_model config key first (set via /settings TUI)
+      const cfg = await Config.get()
+      if (cfg.vision_model) {
+        const parsed = Provider.parseModel(cfg.vision_model)
+        const vm = await Provider.getModel(parsed.providerID, parsed.modelID)
+        if (vm.capabilities.input.image) {
+          const language = await Provider.getLanguage(vm)
+          return { model: vm, language }
+        }
+      }
+      // Fall back to vision agent's model (set via agent config)
+      const visionAgent = await Agent.get("vision")
+      if (visionAgent?.model) {
+        const vm = await Provider.getModel(visionAgent.model.providerID, visionAgent.model.modelID)
+        if (vm.capabilities.input.image) {
+          const language = await Provider.getLanguage(vm)
+          return { model: vm, language }
+        }
+      }
+      // Auto-detect: try priority list of vision-capable models
+      const providers = await Provider.list()
+      for (const candidate of visionModelPriority) {
+        const provider = providers[candidate.providerID]
+        if (!provider) continue
+        const info = provider.models[candidate.modelID]
+        if (info?.capabilities.input.image) {
+          const vm = await Provider.getModel(candidate.providerID, candidate.modelID)
+          const language = await Provider.getLanguage(vm)
+          return { model: vm, language }
+        }
+      }
+      // Last resort: scan all providers for any vision-capable model
+      for (const [providerID, provider] of Object.entries(providers)) {
+        for (const [modelID, info] of Object.entries(provider.models)) {
+          if (info.capabilities.input.image && info.status !== "deprecated") {
+            const vm = await Provider.getModel(providerID, modelID)
+            const language = await Provider.getLanguage(vm)
+            return { model: vm, language }
+          }
+        }
+      }
+      return undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  export type VisionResultCallback = (info: {
+    description: string
+    visionModel: string
+    imageCount: number
+  }) => void | Promise<void>
+
+  async function unsupportedParts(
+    msgs: ModelMessage[],
+    model: Provider.Model,
+    sessionID?: string,
+    onVisionResult?: VisionResultCallback,
+  ): Promise<ModelMessage[]> {
+    // Pre-check: resolve vision model once (only if needed)
+    let visionResolved = false
+    let vision: { model: Provider.Model; language: any } | undefined
+
+    const result: ModelMessage[] = []
+    for (const msg of msgs) {
+      if (msg.role !== "user" || !Array.isArray(msg.content)) {
+        result.push(msg)
+        continue
+      }
+
+      // Check if this message has any unsupported image parts
+      const hasUnsupportedImages = msg.content.some((part) => isUnsupportedImagePart(part, model))
+
+      if (!hasUnsupportedImages) {
+        // Apply standard fallback for non-image unsupported parts (audio, video, pdf)
+        const filtered = msg.content.map((part) => fallbackErrorPart(part, model))
+        result.push({ ...msg, content: filtered })
+        continue
+      }
+
+      // Lazy-resolve vision model on first need
+      if (!visionResolved) {
+        vision = await resolveVisionModel()
+        visionResolved = true
+      }
+
+      if (!vision) {
+        // No vision agent configured — apply standard error fallback
+        const filtered = msg.content.map((part) => fallbackErrorPart(part, model))
+        result.push({ ...msg, content: filtered })
+        continue
+      }
+
+      // Vision conversion path
+      const cache = sessionID ? getVisionCache(sessionID) : undefined
+
+      // Separate image parts from other parts
+      const imageParts: any[] = []
+      const otherParts: any[] = []
+      const imageKeys: string[] = []
+
+      for (const part of msg.content) {
+        if (isUnsupportedImagePart(part, model)) {
+          imageParts.push(part)
+          const key = getPartImageKey(part)
+          imageKeys.push(key ?? `unknown-${imageParts.length}`)
+        } else {
+          // Apply standard fallback for non-image unsupported parts
+          otherParts.push(fallbackErrorPart(part, model))
+        }
+      }
+
+      // Check cache for all image parts
+      const allCached = cache !== undefined && imageKeys.every((key) => cache.has(key))
+      if (allCached && cache) {
+        const descriptions = imageKeys.map((key) => cache.get(key)!)
+        const newContent = [
+          ...otherParts,
+          ...descriptions.map((desc) => ({
+            type: "text" as const,
+            text: `[The user shared an image. A vision model analyzed it and produced this description — use it as if you can see the image yourself]:\n${desc}`,
+          })),
+        ]
+        result.push({ ...msg, content: newContent })
+        continue
+      }
+
+      // Need to call vision model
+      if (sessionID) {
+        SessionStatus.set(sessionID, { type: "busy", message: "Processing image with vision model..." })
+      }
+
+      try {
+        // Extract user text for context
+        const textParts = msg.content
+          .filter((p: any) => p.type === "text")
+          .map((p: any) => p.text)
+          .join("\n")
+
+        const visionPromptParts: any[] = [
+          ...imageParts,
+          {
+            type: "text",
+            text: [
+              "You are a vision subagent. Your only job is to describe what you see in the image(s).",
+              "Output a concise, factual description of the visual content.",
+              "Do NOT engage with the user, do NOT ask questions, do NOT offer to help.",
+              "Do NOT attempt to interpret intent or suggest actions.",
+              "Just describe what is visible: layout, text, colors, UI elements, code, diagrams, etc.",
+              textParts ? `Context for relevance: "${textParts}"` : "",
+            ]
+              .filter(Boolean)
+              .join(" "),
+          },
+        ]
+
+        const visionResult = await generateText({
+          model: vision.language,
+          maxOutputTokens: 4096,
+          headers: vision.model.headers,
+          messages: [
+            {
+              role: "user" as const,
+              content: visionPromptParts,
+            },
+          ],
+        })
+
+        const descriptionText = visionResult.text || "[Vision model returned empty description]"
+
+        // Cache per-image (use combined description for all images in this message)
+        if (cache) {
+          for (const key of imageKeys) {
+            if (key) cache.set(key, descriptionText)
+          }
+        }
+
+        const newContent = [
+          ...otherParts,
+          {
+            type: "text" as const,
+            text: `[The user shared an image. A vision model analyzed it and produced this description — use it as if you can see the image yourself]:\n${descriptionText}`,
+          },
+        ]
+        result.push({ ...msg, content: newContent })
+
+        log.info("vision conversion completed", {
+          imageCount: imageParts.length,
+          visionModel: vision.model.id,
+        })
+
+        if (onVisionResult) {
+          await onVisionResult({
+            description: descriptionText,
+            visionModel: vision.model.id,
+            imageCount: imageParts.length,
+          })
+        }
+      } catch (error) {
+        log.error("vision conversion failed", { error })
+        // Fall back to error text
+        const filtered = msg.content.map((part) =>
+          isUnsupportedImagePart(part, model)
+            ? fallbackErrorPart(part, model, "vision conversion failed")
+            : fallbackErrorPart(part, model),
+        )
+        result.push({ ...msg, content: filtered })
+      } finally {
+        if (sessionID) {
+          SessionStatus.set(sessionID, { type: "busy", message: undefined })
+        }
+      }
+    }
+    return result
+  }
+
+  export async function message(
+    msgs: ModelMessage[],
+    model: Provider.Model,
+    sessionID?: string,
+    onVisionResult?: VisionResultCallback,
+  ) {
+    msgs = await unsupportedParts(msgs, model, sessionID, onVisionResult)
     msgs = normalizeMessages(msgs, model)
     if (model.providerID === "anthropic" || model.api.id.includes("anthropic") || model.api.id.includes("claude")) {
       msgs = applyCaching(msgs, model.providerID)

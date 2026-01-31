@@ -269,7 +269,7 @@ export namespace SessionPrompt {
       }
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
-      
+
       // Check for switch_mode tool in the LATEST assistant message only
       // Only trigger if auto_switch_models is enabled and we haven't already switched
       // Read config fresh (invalidate cache first to get latest settings)
@@ -277,27 +277,27 @@ export namespace SessionPrompt {
       const switchCfg = await Config.getGlobal()
       // Explicitly check for false - undefined/true means enabled
       const autoSwitchEnabled = switchCfg.auto_switch_models !== false
-      
+
       if (autoSwitchEnabled) {
         const latestAssistantMsg = msgs.filter((m) => m.info.role === "assistant").at(-1)
         const switchToolCall = latestAssistantMsg?.parts.find(
           (p) => p.type === "tool" && (p as any).tool === "switch_mode" && (p as any).state?.status === "completed"
         ) as any
-        
+
         if (switchToolCall) {
           // Get the mode from state.input (the tool arguments)
           const targetMode = switchToolCall.state?.input?.mode
           const reason = switchToolCall.state?.input?.reason ?? "Mode switch requested"
-          
+
           // Only switch if we're not already in the target mode
           if (targetMode && lastUser.agent !== targetMode) {
             // Get the model for the target mode
             const modeModelKey = `${targetMode}_model` as keyof typeof switchCfg
             const modeModel = (switchCfg as any)[modeModelKey] as string | undefined
-            
+
             if (modeModel) {
               log.info("switching mode via tool", { from: lastUser.agent, to: targetMode, reason })
-              
+
               const targetModel = Provider.parseModel(modeModel)
               const continueMsg = await Session.updateMessage({
                 id: Identifier.ascending("message"),
@@ -307,7 +307,7 @@ export namespace SessionPrompt {
                 agent: targetMode,
                 model: targetModel,
               })
-              
+
               await Session.updatePart({
                 id: Identifier.ascending("part"),
                 messageID: continueMsg.id,
@@ -317,7 +317,7 @@ export namespace SessionPrompt {
                 text: `Continue with ${targetMode} mode. ${reason}`,
                 time: { start: Date.now(), end: Date.now() },
               })
-              
+
               // Continue the loop with the new mode
               continue
             } else {
@@ -326,7 +326,7 @@ export namespace SessionPrompt {
           }
         }
       }
-      
+
       if (
         lastAssistant?.finish &&
         !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
@@ -694,7 +694,26 @@ export namespace SessionPrompt {
             {
               async transformParams(args: { type: string; params: { prompt?: ModelMessage[]; tools?: unknown[] } }) {
                 if (args.type === "stream") {
-                  args.params.prompt = ProviderTransform.message(args.params.prompt as ModelMessage[], model)
+                  args.params.prompt = await ProviderTransform.message(
+                    args.params.prompt as ModelMessage[],
+                    model,
+                    sessionID,
+                    async (info) => {
+                      const modelName = info.visionModel.split("/").pop() ?? info.visionModel
+                      await Session.updatePart({
+                        id: Identifier.ascending("part"),
+                        messageID: processor.message.id,
+                        sessionID,
+                        type: "text",
+                        synthetic: true,
+                        text: `*[${modelName} interpreted ${info.imageCount} image${info.imageCount > 1 ? "s" : ""}]*\n\n${info.description}`,
+                        time: {
+                          start: Date.now(),
+                          end: Date.now(),
+                        },
+                      })
+                    },
+                  )
                 }
                 // Transform tool schemas for provider compatibility
                 if (args.params.tools && Array.isArray(args.params.tools)) {
@@ -780,12 +799,12 @@ export namespace SessionPrompt {
       mergeDeep(await ToolRegistry.enabled(input.agent)),
       mergeDeep(input.tools ?? {}),
     )
-    
+
     // Check if auto_switch_models is disabled - if so, hide the switch_mode tool
     Config.global.reset()
     const toolsCfg = await Config.getGlobal()
     const autoSwitchEnabled = toolsCfg.auto_switch_models !== false
-    
+
     for (const item of await ToolRegistry.tools(input.model.providerID)) {
       if (Wildcard.all(item.id, enabledTools) === false) continue
       // Hide switch_mode tool if auto-switching is disabled
@@ -922,7 +941,7 @@ export namespace SessionPrompt {
 
   async function createUserMessage(input: PromptInput) {
     const agent = await Agent.get(input.agent ?? "build")
-    
+
     // Resolve model: check agent-specific model config
     let resolvedModel = input.model
     if (!resolvedModel) {
@@ -930,7 +949,7 @@ export namespace SessionPrompt {
       // Check for agent-specific model in config
       const agentModelKey = `${agent.name}_model` as keyof typeof cfg
       const agentModel = cfg[agentModelKey] as string | undefined
-      
+
       if (agentModel) {
         resolvedModel = Provider.parseModel(agentModel)
       } else {
@@ -938,7 +957,7 @@ export namespace SessionPrompt {
         resolvedModel = agent.model ?? (await lastModel(input.sessionID))
       }
     }
-    
+
     const info: MessageV2.Info = {
       id: input.messageID ?? Identifier.ascending("message"),
       role: "user",

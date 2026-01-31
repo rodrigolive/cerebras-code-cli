@@ -186,7 +186,7 @@ export namespace SessionCompaction {
           {
             async transformParams(args: { type: string; params: { prompt?: ModelMessage[] } }) {
               if (args.type === "stream") {
-                args.params.prompt = ProviderTransform.message(args.params.prompt as ModelMessage[], model)
+                args.params.prompt = await ProviderTransform.message(args.params.prompt as ModelMessage[], model, input.sessionID)
               }
               return args.params
             },

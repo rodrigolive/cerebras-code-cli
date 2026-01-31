@@ -98,7 +98,7 @@ describe("ProviderTransform.maxOutputTokens", () => {
 })
 
 describe("ProviderTransform.message - DeepSeek reasoning content", () => {
-  test("DeepSeek with tool calls includes reasoning_content in providerOptions", () => {
+  test("DeepSeek with tool calls includes reasoning_content in providerOptions", async () => {
     const msgs = [
       {
         role: "assistant",
@@ -114,7 +114,7 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
       },
     ] as any[]
 
-    const result = ProviderTransform.message(msgs, {
+    const result = await ProviderTransform.message(msgs, {
       id: "deepseek/deepseek-chat",
       providerID: "deepseek",
       api: {
@@ -157,7 +157,7 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
     expect(result[0].providerOptions?.openaiCompatible?.reasoning_content).toBe("Let me think about this...")
   })
 
-  test("DeepSeek without tool calls strips reasoning from content", () => {
+  test("DeepSeek without tool calls strips reasoning from content", async () => {
     const msgs = [
       {
         role: "assistant",
@@ -168,7 +168,7 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
       },
     ] as any[]
 
-    const result = ProviderTransform.message(msgs, {
+    const result = await ProviderTransform.message(msgs, {
       id: "deepseek/deepseek-chat",
       providerID: "deepseek",
       api: {
@@ -204,7 +204,7 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
     expect(result[0].providerOptions?.openaiCompatible?.reasoning_content).toBeUndefined()
   })
 
-  test("DeepSeek model ID containing 'deepseek' matches (case insensitive)", () => {
+  test("DeepSeek model ID containing 'deepseek' matches (case insensitive)", async () => {
     const msgs = [
       {
         role: "assistant",
@@ -220,7 +220,7 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
       },
     ] as any[]
 
-    const result = ProviderTransform.message(msgs, {
+    const result = await ProviderTransform.message(msgs, {
       id: "someprovider/deepseek-reasoner",
       providerID: "someprovider",
       api: {
@@ -254,7 +254,7 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
     expect(result[0].providerOptions?.openaiCompatible?.reasoning_content).toBe("Thinking...")
   })
 
-  test("Non-DeepSeek providers leave reasoning content unchanged", () => {
+  test("Non-DeepSeek providers leave reasoning content unchanged", async () => {
     const msgs = [
       {
         role: "assistant",
@@ -265,7 +265,7 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
       },
     ] as any[]
 
-    const result = ProviderTransform.message(msgs, {
+    const result = await ProviderTransform.message(msgs, {
       id: "openai/gpt-4",
       providerID: "openai",
       api: {
